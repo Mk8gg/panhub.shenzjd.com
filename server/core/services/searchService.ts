@@ -1,3 +1,4 @@
+import pLimit from "p-limit";
 import { MemoryCache } from "../cache/memoryCache";
 import { createLogger } from "../utils/logger";
 import { safeExecute, fetchWithRetry } from "../utils/fetch";
@@ -409,34 +410,8 @@ export class SearchService {
     tasks: Array<() => Promise<T>>,
     limit: number
   ): Promise<T[]> {
-    const queue = tasks.slice();
-    const results: T[] = [];
-    let running: Promise<void>[] = [];
-
-    const runNext = async () => {
-      const task = queue.shift();
-      if (!task) return;
-      const p = task()
-        .then((res) => {
-          results.push(res);
-        })
-        .catch(() => {
-          /* swallow */
-        });
-      const wrapped = p.then(() => {
-        /* slot freed */
-      });
-      running.push(wrapped);
-      if (running.length >= limit) {
-        await Promise.race(running);
-        running = running.filter((r) => r !== wrapped);
-      }
-      await runNext();
-    };
-
-    const starters = Math.min(limit, queue.length);
-    await Promise.all(Array.from({ length: starters }, () => runNext()));
-    await Promise.all(running);
-    return results;
+    const limitFn = pLimit(limit);
+    const limitedTasks = tasks.map((task) => limitFn(task));
+    return Promise.all(limitedTasks);
   }
 }
