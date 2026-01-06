@@ -37,12 +37,9 @@ export default defineNuxtConfig({
     preset: process.env.VERCEL
       ? "vercel"
       : process.env.NITRO_PRESET || "cloudflare-module",
-    prerender: {
-      routes: ["/"],
-    },
   },
   routeRules: {
-    "/": { swr: 3600 },
+    "/**": { swr: 3600 },
   },
   runtimeConfig: {
     // server-only 配置
