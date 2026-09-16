@@ -7,7 +7,9 @@
  * - 迅雷：链接带 ?pwd=xxx# + App 话术
  * - UC：多行「来自UC网盘分享文件：」开头
  *
- * 识别不了盘型时回退夸克格式。
+ * 识别不了盘型时走**通用格式**：不回退夸克话术——非五盘（115/天翼/123/139/磁力…）
+ * 套夸克话术会给出「打开夸克APP」的错误引导，用户复制后打不开。通用格式只说
+ * 「对应网盘 App」，不编造平台。
  */
 
 export type ShareDriver = "quark" | "baidu" | "xunlei" | "uc";
@@ -29,6 +31,20 @@ export function appNameOf(text?: string): string {
   if (d === "xunlei") return "迅雷";
   if (d === "uc") return "UC网盘";
   return "对应网盘";
+}
+
+/**
+ * 通用口令：不认识的盘型一律用它，**不冒充任何平台**。
+ * 各网盘的剪贴板识别统一认「链接：」标签，所以通用格式同样能被 APP 识别；
+ * 末尾只提示「打开对应网盘 App」，把平台判断留给用户。
+ */
+function genericShareText(link: string, name: string, code: string): string {
+  const lines: string[] = [];
+  if (name) lines.push(`「${name}」`);
+  lines.push(`链接：${link}`);
+  if (code) lines.push(`提取码：${code}`);
+  lines.push("复制链接后打开对应网盘 App 即可获取。");
+  return lines.join("\n");
 }
 
 export function buildShareText(data: {
@@ -64,13 +80,19 @@ export function buildShareText(data: {
     return lines.join("\n");
   }
 
-  const head = name
-    ? `我用夸克网盘给你分享了「${name}」，点击链接或复制整段内容，打开「夸克APP」即可获取。`
-    : "点击链接或复制整段内容，打开「夸克APP」即可获取。";
-  return code
-    ? `${head}
+  // 夸克：官方多行格式（话术里的 APP 名必须是夸克本身，不能泛化）
+  if (driver === "quark") {
+    const head = name
+      ? `我用夸克网盘给你分享了「${name}」，点击链接或复制整段内容，打开「夸克APP」即可获取。`
+      : "点击链接或复制整段内容，打开「夸克APP」即可获取。";
+    return code
+      ? `${head}
 链接：${link}
 提取码：${code}`
-    : `${head}
+      : `${head}
 链接：${link}`;
+  }
+
+  // 其余盘型（115/天翼/阿里/123/139/磁力/未知站点…）：通用格式
+  return genericShareText(link, name, code);
 }

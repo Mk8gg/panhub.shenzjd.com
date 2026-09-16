@@ -8,30 +8,27 @@
         <h3 class="platform-title">{{ title }}</h3>
         <span class="resource-count">{{ items.length }} 个资源</span>
       </div>
+      <button
+        v-if="canToggleCollapse && !expanded && items.length > initialVisible"
+        class="expand-btn"
+        @click="$emit('toggle')">
+        展开
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M6 9l6 6 6-6"></path>
+        </svg>
+      </button>
     </div>
 
     <ul class="resource-list">
       <li v-for="r in visibleItems" :key="r.tid || r.url" class="resource-item">
         <div class="resource-content">
-          <!-- 有 tid 的条目直链已被服务端剥离，渲染为可点击文本（点击=获取） -->
-          <a
-            v-if="r.url"
-            class="resource-link"
-            :href="r.url"
-            target="_blank"
-            rel="noopener noreferrer nofollow"
-            :title="r.note || r.url">
-            <span class="link-text">{{ r.note || r.url }}</span>
-            <svg class="external-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-              <polyline points="15 3 21 3 21 9"></polyline>
-              <line x1="10" y1="14" x2="21" y2="3"></line>
-            </svg>
-          </a>
+          <!-- 所有条目统一渲染为可点击文本——点标题即「获取」，不再暴露 <a href> 直链。
+               此前仅已接入转存的盘型剥离了 url，其余盘型仍是外链，用户点标题直接跳转
+               原分享链接，绕过「获取」流程。统一后无任何直跳路径。 -->
           <span
-            v-else
-            class="resource-link resource-link--tid"
-            :title="r.note || '网盘资源'"
+            class="resource-link"
+            :class="{ 'resource-link--dead': linkStatus(r) === 'bad' }"
+            :title="linkStatus(r) === 'bad' ? '该资源已失效' : '点击获取资源'"
             @click="handleGet(r)">
             <span class="link-text">{{ r.note || "网盘资源" }}</span>
           </span>
@@ -56,13 +53,22 @@
                 </svg>
                 提取码: {{ r.password }}
               </span>
+
+              <!-- 服务端探活结果角标（异步懒查，不阻塞渲染） -->
+              <span v-if="linkStatus(r) === 'bad'" class="meta-tag dead">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+                已失效
+              </span>
             </div>
 
             <button
               class="transfer-btn"
               :class="{
                 'transfer-btn--loading': getStatus(r) === 'loading',
-                'transfer-btn--dead': getStatus(r) === 'dead',
+                'transfer-btn--dead': getStatus(r) === 'dead' || linkStatus(r) === 'bad',
                 'transfer-btn--done': getStatus(r) === 'done',
               }"
               :disabled="isTransferBtnDisabled(r)"
@@ -95,8 +101,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, watch } from "vue";
 import { useTransfer } from "../composables/useTransfer";
+import { useLinkCheck } from "../composables/useLinkCheck";
 import type { MergedLink } from "../types";
 
 const props = defineProps<{
@@ -106,23 +113,45 @@ const props = defineProps<{
   items: MergedLink[];
   expanded: boolean;
   initialVisible: number;
+  /** 是否在卡片头部显示「展开」（默认由底部按钮承担） */
+  canToggleCollapse?: boolean;
 }>();
 
 defineEmits(["toggle"]);
 
+// 「获取」：状态与请求都在 useTransfer 单例里，同一资源在多个卡片/分组间共享状态，
+// 避免重复请求；无 tid 的盘型由 useTransfer 内部假装请求后复制原链接
 const { statusOf: transferStatus, requestTransfer, anyBusy: transferBusy } = useTransfer();
+
+// 链接有效性检测（服务端探活，异步懒查当前可见链接）。
+// 必须声明在 isTransferBtnDisabled / handleGet 之前：两者在渲染期都会读探活结果，
+// 提前声明可规避 TDZ。
+const { enqueue, statusOf } = useLinkCheck();
+
+function linkStatus(r: MergedLink) {
+  // 直链已全量剥离（含非五盘），探活按 tid 上报与索引；
+  // 没有 tid 的旧数据（浏览器缓存的旧响应）回落 url 键
+  return statusOf(r.tid || r.url)?.status;
+}
 
 function getStatus(r: MergedLink) {
   return transferStatus(r.tid || r.url);
 }
 
-/** 自身 loading/dead，或全局有其它「获取」在跑（done 本地复制除外） */
+/**
+ * 禁用条件：
+ * - 探活已判失效（check 侧 bad）→ 直接禁用，从源头拦住「点了才失败」。
+ *   探活是异步懒查、只查当前可见项，结果回来前按钮仍可点（固有竞态，无法归零）。
+ * - 自身 loading/dead，或全局有其它「获取」在跑（done 本地复制除外）
+ */
 function isTransferBtnDisabled(r: MergedLink): boolean {
+  if (linkStatus(r) === "bad") return true;
   const st = getStatus(r);
   return st === "loading" || st === "dead" || (transferBusy.value && st !== "done");
 }
 
 function transferBtnLabel(r: MergedLink): string {
+  if (linkStatus(r) === "bad") return "已失效";
   const st = getStatus(r);
   if (st === "loading") return "获取中…";
   if (st === "done") return "已获取";
@@ -131,8 +160,8 @@ function transferBtnLabel(r: MergedLink): string {
 }
 
 function btnTitle(r: MergedLink): string {
+  if (linkStatus(r) === "bad" || getStatus(r) === "dead") return "该资源已失效，无法获取";
   const st = getStatus(r);
-  if (st === "dead") return "该资源已失效，无法获取";
   if (st === "done") return "点击查看并复制获取的内容";
   if (st === "loading") return "正在获取";
   if (transferBusy.value) return "正在获取其他资源，请稍候";
@@ -140,11 +169,34 @@ function btnTitle(r: MergedLink): string {
 }
 
 async function handleGet(r: MergedLink) {
+  // 所有条目统一可点，点标题与点「获取」按钮走同一入口。探活判失效时同样拦下，
+  // 避免绕过按钮的 disabled。
+  if (linkStatus(r) === "bad") return;
   await requestTransfer({ tid: r.tid, url: r.url, name: r.note });
 }
 
+// 注意：visibleItems 必须先于下方 watch 声明——watch({ immediate: true }) 会在
+// setup 执行到 watch 行时立即求值 getter，若声明在后会触发 TDZ。
 const visibleItems = computed(() =>
   props.expanded ? props.items : props.items.slice(0, props.initialVisible)
+);
+
+// 只探活「当前可见」的条目：展开更多时自动补探，避免一次性把整页几百条打给后端
+watch(
+  () => visibleItems.value,
+  (items) => {
+    if (!items || items.length === 0) return;
+    enqueue(
+      items
+        .filter((r) => r.tid || (typeof r.url === "string" && r.url))
+        .map((r) => ({
+          tid: typeof r.tid === "string" ? r.tid : "",
+          url: typeof r.url === "string" ? r.url : "",
+          password: typeof r.password === "string" ? r.password : "",
+        }))
+    );
+  },
+  { immediate: true }
 );
 
 function formatDate(d?: string) {
@@ -321,8 +373,54 @@ function formatDate(d?: string) {
   border-color: rgba(16, 185, 129, 0.2);
   color: var(--success);
 }
-.resource-link--tid {
+/* 统一为可点文本入口后，标题即「获取」按钮 */
+.resource-link {
   cursor: pointer;
+}
+
+/* 头部展开（可选，由 canToggleCollapse 控制） */
+.expand-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  background: transparent;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color var(--transition-fast), border-color var(--transition-fast),
+    color var(--transition-fast), transform var(--transition-fast);
+}
+.expand-btn:hover {
+  background: var(--bg-secondary);
+  border-color: var(--border-medium);
+  color: var(--text-primary);
+  transform: translateY(-1px);
+}
+.expand-btn svg {
+  stroke: currentColor;
+}
+
+/* 服务端探活判失效的角标 */
+.meta-tag.dead {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.25);
+  color: #ef4444;
+}
+
+/* 失效链接：删除线 + 弱化，且不可点（点击=获取） */
+.resource-link--dead {
+  text-decoration: line-through;
+  text-decoration-color: #ef4444;
+  text-decoration-thickness: 1.5px;
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.resource-link--dead:hover {
+  color: inherit;
 }
 
 .transfer-btn {

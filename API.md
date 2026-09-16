@@ -73,7 +73,11 @@ Authorization: Bearer <wxauth-token>
 | `/api/search.stream` | GET (SSE) | ✅ Bearer | **搜索主通道**，边搜边出 | ✅ |
 | `/api/search` | GET | ✅ Bearer | 搜索（非流式 / 批次模式） | — |
 | `/api/transfer` | POST | ✅ Bearer | **「获取」换取分享链接** | ✅ |
-| `/api/check` | POST | ❌ | 链接探活（失效 / 需密码） | — |
+| `/api/points/balance` | GET | ✅ Bearer | 积分余额 / 今日签到状态 | ✅ |
+| `/api/points/checkin` | POST | ✅ Bearer | 每日签到（幂等） | ✅ |
+| `/api/points/ad-qr` | POST | ✅ Bearer | 看广告赚分 · 出码 | ✅ |
+| `/api/points/ad-status` | GET | ❌ | 看广告赚分 · 票据状态 | ✅ |
+| `/api/check` | POST | ❌ | 链接探活（失效 / 需密码） | ✅ |
 | `/api/hot-searches` | GET | ❌ | 热搜词 | — |
 | `/api/douban-hot` | GET | ❌ | 豆瓣影视榜单 | ✅ |
 | `/api/announcement` | GET | ❌ | 站点公告 | ✅ |
@@ -190,10 +194,64 @@ data: {"total":126,"warnings":[],"pluginCount":8,"merged":{...},"completedIndice
 { "code": 1, "data": { "dead": true, "kind": "expired", "message": "该资源已失效…" } }
 ```
 
-### 瞬时错误
+### 未获取到新链接（`fallback`）
 
-其余错误（容量、风控、超时）**会静默回退成原链接**并返回 `code: 0`，
-这是有意的设计——用户永远有可用的结果。
+风控 / 容量 / 权限 / 凭证失效等**结果确定失败**的情况，返回 `code: 0` + `fallback: true`，
+并附中性 `message`；原链接会放进 `share_url`（仍可用，只是不是我们账号的新分享）：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "fallback": true,
+    "message": "服务暂时繁忙，未能获取到新链接",
+    "share_url": "https://…",
+    "passcode": ""
+  }
+}
+```
+
+超时 / 网络等**结果未知**的情况维持纯静默回退（不带 `fallback` 字段），
+避免把可能已成功的请求说成失败。
+
+> 两种情况的 `code` 都是 0、`share_url` 都存在——接入方至少要展示 `fallback` 分支的
+> `message`，否则用户会把「回退的原链接」误认成转存成功。
+
+### 积分不足（`insufficient`）与每日限流（`limited`）
+
+服务端按账号积分计费（每次获取扣分，分值由服务端配置）。积分不足时**不转存、也不回退原链接**，
+返回 `code: 0` 并带 `insufficient: true`：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "limited": true,
+    "insufficient": true,
+    "message": "积分不够了，扫码看个广告（+10 积分）就能继续获取。",
+    "points": { "balance": 0, "amount": 1, "adReward": 10, "adsRemaining": 3 }
+  }
+}
+```
+
+此时正确动作是**引导用户赚分**（官方前台弹出小程序码看激励视频，轮询
+`/api/points/ad-status` 等积分到账后自动重试本次获取），而**不是**提示「资源已失效」——
+后者会让用户误以为链接坏了。
+
+每日限流（可在线配置，默认关闭）命中时返回
+`{ limited: true, used, limit, driver, message }`，只停该网盘当天，换网盘或次日再试即可。
+
+### 扣分回执（`points`）
+
+链接交付成功时（真实转存 / 缓存命中 / 回退原链接 / 非转存盘型直给）下发：
+
+```json
+{ "points": { "charged": "points", "amount": 1, "balance": 9 } }
+```
+
+`charged` 取值：`points`（真扣分）/ `unlock`（抵扣看广告获得的放行额度）/
+`replayed`（幂等重放，未重复扣分）。
+用户没拿到链接的路径（失效、限流、积分不足）一律不计费。
 
 ### 复制口令格式
 
@@ -210,6 +268,47 @@ data: {"total":126,"warnings":[],"pluginCount":8,"merged":{...},"completedIndice
 ---
 
 ## 7. 其他接口
+
+### 积分（需登录）
+
+「获取」按账号积分计费，积分先由每日签到、再看激励广告补充。
+
+| 接口 | 方法 | 鉴权 | 说明 |
+|---|---|---|---|
+| `/api/points/balance` | GET | ✅ Bearer | 余额 + 今日是否已签到 + 分值参数 |
+| `/api/points/checkin` | POST | ✅ Bearer | 每日签到（幂等） |
+| `/api/points/ad-qr` | POST | ✅ Bearer | 看广告赚分 · 出码 |
+| `/api/points/ad-status` | GET | ❌ | 看广告赚分 · 票据状态轮询 |
+
+`GET /api/points/balance`（分值都由服务端下发，前端不要写死数字）：
+
+```json
+{ "ok": true, "balance": 9, "checkedIn": true, "checkinReward": 3, "adReward": 10, "adsRemaining": 3 }
+```
+
+`POST /api/points/checkin`——按**北京自然日**幂等，进页时无脑调一次即可，
+已领过返回 `granted: 0` 不报错：
+
+```json
+{ "ok": true, "granted": 3, "balance": 12 }
+```
+
+看广告赚分闭环（官方前台的真实用法）：
+
+```json
+// ① POST /api/points/ad-qr —— 服务端用**你自己的凭证**领票并签发小程序码
+{ "ok": true, "qrDataUrl": "data:image/png;base64,…", "ticket": "xxxxxxxx", "expiresIn": 900 }
+
+// ② GET /api/points/ad-status?ticket=xxxxxxxx —— 每 2s 轮询一次
+{ "status": "pending" }
+```
+
+`status` 取值：`pending`（还没看完，继续轮询）/ `redeemed`（积分已到账，可重试本次获取）/
+`expired`（票过期，提示用户重新点「获取」）。
+
+> 票是 128 位随机串、不可枚举，所以状态查询不鉴权；出码必须用自己的 token，
+> 用服务端凭证代领会把积分记到别人账号上。
+> 出码失败一律返回 `200 + ok: false`，接入方按「稍后再试」降级即可。
 
 ### `POST /api/check`（无需登录）
 

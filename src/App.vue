@@ -17,14 +17,20 @@
     <!-- 公告条 -->
     <div v-if="announcementVisible" class="announce-bar" role="status">
       <span class="announce-bar__icon" aria-hidden="true">📢</span>
-      <div class="announce-bar__viewport">
+      <div ref="viewportEl" class="announce-bar__viewport">
         <span :key="announcementIndex" class="announce-bar__slide">
-          <a
-            v-if="currentAnnouncement?.link"
-            :href="currentAnnouncement.link"
-            target="_blank"
-            rel="noopener">{{ currentAnnouncement.text }}</a>
-          <template v-else>{{ currentAnnouncement?.text }}</template>
+          <span
+            ref="textEl"
+            class="announce-bar__text"
+            :class="{ 'announce-bar__text--scrolling': scrollDistance > 0 }"
+            :style="scrollStyle">
+            <a
+              v-if="currentAnnouncement?.link"
+              :href="currentAnnouncement.link"
+              target="_blank"
+              rel="noopener">{{ currentAnnouncement.text }}</a>
+            <template v-else>{{ currentAnnouncement?.text }}</template>
+          </span>
         </span>
       </div>
       <button class="announce-bar__close" type="button" aria-label="关闭公告" title="关闭" @click="dismissAnnouncement">✕</button>
@@ -53,6 +59,11 @@
           </div>
           <div class="hero-shape" aria-hidden="true"></div>
         </header>
+        <aside class="hero-aside">
+          <ErrorBoundary message="热搜加载失败">
+            <HotSearchSection ref="hotSearchRef" :on-search="quickSearch" />
+          </ErrorBoundary>
+        </aside>
       </div>
 
       <SearchBox
@@ -66,6 +77,10 @@
         @reset="fullReset"
         @pause="pauseSearch"
         @continue="handleContinueSearch" />
+
+      <!-- 积分入口：本站签到是「进页自动签」，页面上没有可点的领分动作，
+           这里给一条明确路径（小程序「我的」页签到） -->
+      <PointsEntry />
 
       <!-- 统计 + 平台过滤 -->
       <div v-if="searched" class="stats-bar">
@@ -121,6 +136,7 @@
             :items="sortedItems(group.items)"
             :expanded="filterPlatform !== 'all' || expandedSet.has(group.type)"
             :initial-visible="3"
+            :can-toggle-collapse="false"
             @toggle="handleToggle(group.type)" />
         </div>
       </section>
@@ -157,6 +173,18 @@
               <p>试试其他关键词，或稍后再试</p>
             </div>
           </div>
+          <div v-if="hotTerms.length > 0" class="empty-suggestions">
+            <span class="empty-suggestions__label">大家都在搜：</span>
+            <div class="empty-suggestions__tags">
+              <button
+                v-for="term in hotTerms"
+                :key="term"
+                class="empty-suggestions__tag"
+                @click="quickSearch(term)">
+                {{ term }}
+              </button>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -176,7 +204,10 @@
       <span class="footer-copy">PanHub · 聚合搜索，不存储任何文件</span>
     </footer>
 
-    <TransferDialog />
+    <!-- 「获取」等待/复制弹窗（含积分不足看广告、限流、回退等全部状态） -->
+    <TransferStatusDialog />
+    <!-- 弹窗公告：未传 text/qr-src 时自动不弹，部署方按需配置 -->
+    <NoticeModal />
   </div>
 
   <!-- 全站 Toast -->
@@ -186,16 +217,24 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onBeforeUnmount, ref } from "vue";
+import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from "vue";
 import SearchBox from "./components/SearchBox.vue";
 import ResultGroup from "./components/ResultGroup.vue";
 import DoubanHot from "./components/DoubanHot.vue";
-import TransferDialog from "./components/TransferDialog.vue";
+import TransferStatusDialog from "./components/TransferStatusDialog.vue";
+import PointsEntry from "./components/PointsEntry.vue";
+import HotSearchSection from "./components/HotSearchSection.vue";
+import NoticeModal from "./components/NoticeModal.vue";
+import ErrorBoundary from "./components/ErrorBoundary.vue";
+import { API_BASE } from "./config";
 import { useSearch } from "./composables/useSearch";
 import { useAnnouncement } from "./composables/useAnnouncement";
 import { useToast } from "./composables/useToast";
+import { useDarkMode } from "./composables/useDarkMode";
+import { usePoints } from "./composables/usePoints";
 import { platformInfo } from "./config/platforms";
-import { checkSearchAuth, forceVerify } from "./api/auth";
+import { checkSearchAuth, forceVerify, isVerified } from "./api/auth";
+import { orderDriverGroups } from "./utils/driverPriority";
 import type { MergedLink } from "./types";
 
 // ===== 状态 =====
@@ -228,6 +267,43 @@ const {
   dismiss: dismissAnnouncement,
 } = useAnnouncement();
 const { toast } = useToast();
+const { init: initDarkMode } = useDarkMode();
+
+// 热搜组件引用（词云自己拉 /api/hot-searches，与官方站同源）
+const hotSearchRef = ref<InstanceType<typeof HotSearchSection> | null>(null);
+
+// 空状态「大家都在搜」推荐词
+const hotTerms = ref<string[]>([]);
+
+/**
+ * 统一拉一次热搜（limit=25）：前 5 个给空状态推荐词，整份喂给词云，
+ * 省掉词云组件自己那次请求；拉不到就交给词云内部兜底请求。
+ */
+async function fetchHotTerms() {
+  try {
+    const res = await fetch(`${API_BASE}/hot-searches?limit=25`);
+    const data = await res.json();
+    if (data.code === 0 && data.data?.hotSearches) {
+      const list = data.data.hotSearches;
+      hotTerms.value = list.map((s: any) => s.term).slice(0, 5);
+      hotSearchRef.value?.setData(list);
+      return;
+    }
+  } catch {}
+  hotSearchRef.value?.init();
+}
+
+// 每日积分签到：认证通过后自动签到一次（分值是账本参数，前端不写死数字）。
+// 必须等 isVerified 置位再调——未登录时调只会拿到 401，纯浪费请求。
+// 状态是模块级单例（usePoints），积分入口条读的是同一份余额。
+const { ensureDailyCheckin } = usePoints();
+watch(
+  isVerified,
+  (v) => {
+    if (v) void ensureDailyCheckin();
+  },
+  { immediate: true }
+);
 
 const announcementIndex = ref(0);
 let rotateTimer: ReturnType<typeof setInterval> | null = null;
@@ -235,6 +311,41 @@ let rotateTimer: ReturnType<typeof setInterval> | null = null;
 const currentAnnouncement = computed(
   () => announcementItems.value[announcementIndex.value] ?? null
 );
+
+// 公告跑马灯：单条一行放不下时左右来回滚动（hover 暂停），能放下就静止居中。
+// 是否滚动由实测宽度决定——不能只看字数，等宽字体与标点都会影响实际宽度。
+const viewportEl = ref<HTMLElement | null>(null);
+const textEl = ref<HTMLElement | null>(null);
+const scrollDistance = ref(0); // >0 表示当前条目超宽，需要来回滚动
+
+const scrollStyle = computed(() => {
+  if (scrollDistance.value <= 0) return {};
+  const duration = Math.max(6, Math.round(scrollDistance.value / 30));
+  return {
+    "--announce-scroll-distance": `-${scrollDistance.value}px`,
+    "--announce-scroll-duration": `${duration}s`,
+  };
+});
+
+/** 超宽判定：文本实际宽度超出视口可视宽度才启用左右滚动动画 */
+function measureScroll() {
+  const vp = viewportEl.value;
+  const tx = textEl.value;
+  if (!vp || !tx) {
+    scrollDistance.value = 0;
+    return;
+  }
+  const dist = Math.ceil(tx.scrollWidth - vp.clientWidth);
+  scrollDistance.value = dist > 4 ? dist : 0;
+}
+
+watch(announcementIndex, () => {
+  nextTick(measureScroll);
+});
+
+function onResize() {
+  if (announcementVisible.value) measureScroll();
+}
 
 // ===== 搜索 =====
 
@@ -311,26 +422,28 @@ function fullReset() {
 
 // ===== 结果展示 =====
 
-/** 平台 pill 按结果数量降序（SSE 推送顺序不定，不能依赖 key 顺序） */
+/**
+ * 平台 pill 与分组顺序统一走 orderDriverGroups：接了转存的五家占前几位
+ * （五盘之间按结果数降序），其余盘型按结果数降序。
+ * SSE 推送时 merged 的 key 按首个结果到达顺序插入，次序随机，不能依赖 key 顺序。
+ */
 const platforms = computed(() => {
   const m = merged.value || {};
-  return Object.keys(m)
-    .filter((type) => (m[type]?.length ?? 0) > 0)
-    .sort((a, b) => (m[b]?.length ?? 0) - (m[a]?.length ?? 0));
+  return orderDriverGroups(
+    Object.keys(m).filter((type) => (m[type]?.length ?? 0) > 0),
+    (type) => m[type]?.length ?? 0
+  );
 });
 
 const groupedResults = computed(() => {
-  const list: Array<{ type: string; items: MergedLink[] }> = [];
   const source =
     filterPlatform.value === "all"
       ? merged.value
       : { [filterPlatform.value]: merged.value[filterPlatform.value] || [] };
-  for (const type of Object.keys(source)) {
-    if (!source[type]?.length) continue;
-    list.push({ type, items: source[type] || [] });
-  }
-  list.sort((a, b) => (b.items?.length ?? 0) - (a.items?.length ?? 0));
-  return list;
+  return orderDriverGroups(
+    Object.keys(source).filter((type) => (source[type]?.length ?? 0) > 0),
+    (type) => source[type]?.length ?? 0
+  ).map((type) => ({ type, items: source[type] || [] }));
 });
 
 function handleToggle(type: string) {
@@ -349,13 +462,23 @@ function sortedItems(items: MergedLink[]): MergedLink[] {
 // ===== 生命周期 =====
 
 onMounted(async () => {
-  loadAnnouncement().then(() => {
+  // 暗色模式：跟随系统主题实时变化（首屏由 index.html 阻塞脚本即时应用）
+  initDarkMode();
+  // 热搜（词云 + 空状态推荐词）：只在挂载时拉一次
+  void fetchHotTerms();
+  // 窗口尺寸变化时重新判定公告是否需要滚动
+  window.addEventListener("resize", onResize);
+
+  loadAnnouncement().then(async () => {
     if (announcementItems.value.length > 1) {
       rotateTimer = setInterval(() => {
         announcementIndex.value =
           (announcementIndex.value + 1) % announcementItems.value.length;
       }, 6000);
     }
+    // 首条公告渲染完量一次宽度，决定是否需要来回滚动
+    await nextTick();
+    measureScroll();
   });
 
   // 从 URL 读取搜索词与类别，自动搜索（?q= 直访）
@@ -371,6 +494,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (rotateTimer) clearInterval(rotateTimer);
+  window.removeEventListener("resize", onResize);
 });
 </script>
 
@@ -466,6 +590,30 @@ onBeforeUnmount(() => {
 .announce-bar__slide a {
   color: var(--primary);
   text-decoration: underline;
+}
+.announce-bar__text {
+  display: inline-block;
+  white-space: nowrap;
+}
+.announce-bar__text a {
+  color: var(--primary);
+  text-decoration: underline;
+}
+/* 超宽来回滚动（alternate 往返）；hover 暂停方便阅读/点链接 */
+.announce-bar__text--scrolling {
+  animation: announceBounce var(--announce-scroll-duration, 12s) ease-in-out infinite alternate;
+  will-change: transform;
+}
+.announce-bar__viewport:hover .announce-bar__text--scrolling {
+  animation-play-state: paused;
+}
+@keyframes announceBounce {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(var(--announce-scroll-distance, -100px));
+  }
 }
 .announce-bar__close {
   flex-shrink: 0;
@@ -604,6 +752,27 @@ onBeforeUnmount(() => {
   filter: blur(24px);
   pointer-events: none;
   z-index: 0;
+}
+
+/* 热搜词云（英雄区右侧）：嵌入时去掉独立卡片感，跟英雄区融为一体 */
+.hero-aside {
+  flex-shrink: 0;
+  width: 340px;
+}
+.hero-aside :deep(.tag-cloud-wrap),
+.hero-aside :deep(.loading-state),
+.hero-aside :deep(.tag-cloud-placeholder) {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+.hero-aside :deep(.tag-cloud-wrap) {
+  padding: 12px 16px;
+  min-height: 260px;
+}
+.hero-aside :deep(.hot-tagcloud) {
+  height: 240px !important;
 }
 /* ===== 统计栏 ===== */
 .stats-bar {
@@ -838,6 +1007,42 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
   line-height: 1.6;
 }
+/* 空状态右侧的热搜推荐：与左侧图标区并排，窄屏时改为上下堆叠 */
+.empty-suggestions {
+  flex: 1 1 320px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  border-left: 1px solid var(--border-light);
+  padding-left: 40px;
+}
+.empty-suggestions__label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+.empty-suggestions__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.empty-suggestions__tag {
+  font-size: 14px;
+  padding: 6px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--border-light);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.empty-suggestions__tag:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.06);
+}
 /* ===== 错误 ===== */
 .error-alert {
   display: flex;
@@ -894,6 +1099,9 @@ onBeforeUnmount(() => {
   .hero-row {
     flex-direction: column;
   }
+  .hero-aside {
+    width: 100%;
+  }
   .main {
     padding: 16px;
   }
@@ -904,6 +1112,9 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 640px) {
+  .hero-aside {
+    display: none;
+  }
   .hero {
     padding: 24px 18px;
   }
@@ -925,6 +1136,13 @@ onBeforeUnmount(() => {
   .empty-icon {
     width: 64px;
     height: 64px;
+  }
+  .empty-suggestions {
+    width: 100%;
+    border-left: none;
+    padding-left: 0;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-light);
   }
 }
 

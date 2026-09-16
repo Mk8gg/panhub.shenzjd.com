@@ -26,6 +26,27 @@ export const PLATFORM_INFO: Record<string, PlatformInfo> = {
     color: "#0f766e",
     icon: "./icons/wikisource.svg",
   },
+  // 正版源矩阵（合规源不挂 tid、不剥离直链，条目直指在线阅读/下载）
+  wikibooks: {
+    name: "维基教科书",
+    color: "#0369a1",
+    icon: "./icons/wikibooks.svg",
+  },
+  openlibrary: {
+    name: "开放图书馆",
+    color: "#d97706",
+    icon: "./icons/openlibrary.svg",
+  },
+  doaj: {
+    name: "DOAJ 开放期刊",
+    color: "#ea580c",
+    icon: "./icons/doaj.svg",
+  },
+  doab: {
+    name: "DOAB 开放专著",
+    color: "#1b75bb",
+    icon: "./icons/doab.svg",
+  },
 };
 
 /** 类别搜索下拉项（slug 与后端 cat 参数一致） */
