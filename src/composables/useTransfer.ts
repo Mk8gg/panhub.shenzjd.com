@@ -38,6 +38,25 @@ let toastTimer: ReturnType<typeof setTimeout> | null = null;
 const busyCount = ref(0);
 const anyBusy = computed(() => busyCount.value > 0);
 
+/**
+ * 「立即获取」弹窗 loading 态的最短展示时长（ms）。
+ *
+ * 为什么必须有：五盘是真实转存（实测 5~30s），而非五盘 / 命中缓存走的是
+ * 「原链接交付」——后端毫秒级就返回，弹窗会闪一下直接跳「获取成功」，用户会
+ * 以为「根本没请求」（同小程序端 TRANSFER_AD_MIN_MS = 3000 的处理）。
+ * 补足到最短时长，等待期的转圈才是可信的。
+ *
+ * 只对**会落到弹窗结果态**的路径补齐（成功 / 失效 / 回退 / 无兜底）；
+ * 限流与积分不足不补——那两条直接给下一步动作（看广告赚分），让用户白等没有意义。
+ */
+const MIN_LOADING_MS = 3000;
+
+/** 把 loading 态补足到最短展示时长（超过则立即返回，不额外等待） */
+async function ensureMinLoading(startedAt: number): Promise<void> {
+  const remain = MIN_LOADING_MS - (Date.now() - startedAt);
+  if (remain > 0) await new Promise((r) => setTimeout(r, remain));
+}
+
 // —— 内置等待/复制弹窗（components/TransferStatusDialog.vue）——
 // 交互：点击「获取」即弹「正在获取」；成功后不自动复制，弹窗内出现「复制」按钮；
 // 用户点复制才写入剪贴板，弹窗保持打开（二维码还在，可扫码看广告赚积分），手动关闭。
@@ -209,6 +228,8 @@ export function useTransfer() {
     busyCount.value++;
     statusMap.value[key] = "loading";
     openTransferDialog(key);
+    // 补时基准：从弹窗亮起那一刻算（见 MIN_LOADING_MS）
+    const startedAt = Date.now();
     const finish = () => {
       busyCount.value = Math.max(0, busyCount.value - 1);
     };
@@ -235,6 +256,7 @@ export function useTransfer() {
               : "该资源暂无法获取";
           deadMsgCache.value[key] = msg;
           statusMap.value[key] = "dead";
+          await ensureMinLoading(startedAt);
           failTransferDialog(msg, "dead");
           return;
         }
@@ -281,6 +303,7 @@ export function useTransfer() {
           const origin = resp.data.share_url || item.url;
           if (origin) shareTextCache.value[key] = origin;
           statusMap.value[key] = "idle";
+          await ensureMinLoading(startedAt);
           failTransferDialog(msg, origin ? "fallback" : "error");
           return;
         }
@@ -308,12 +331,16 @@ export function useTransfer() {
       // 兜底也没拿到链接（tid 过期/未登录，且直链已被剥离）：不能假装获取成功
       if (!shareText) {
         statusMap.value[key] = "idle";
+        await ensureMinLoading(startedAt);
         failTransferDialog("内容已过期，请重新搜索后再获取");
         return;
       }
       shareTextCache.value[key] = shareText;
       statusMap.value[key] = "done";
       dialogPointsTip.value = pointsTip;
+      // 成功同样补足最短 loading：非五盘/缓存命中的交付是毫秒级的，
+      // 不补会让弹窗一闪就跳到「获取成功」，用户以为根本没请求
+      await ensureMinLoading(startedAt);
       openTransferDialog(key, true);
     } finally {
       finish();
