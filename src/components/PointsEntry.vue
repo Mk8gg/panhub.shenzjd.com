@@ -63,7 +63,7 @@
           小程序签到领积分
         </h3>
         <p class="pe-sub">
-          每次「获取」消耗 1 积分{{ checkinReward > 0 ? `，签到一次得 ${checkinReward} 积分` : "" }}
+          每次「立即获取」消耗 1 积分{{ checkinReward > 0 ? `，签到一次得 ${checkinReward} 积分` : "" }}
         </p>
 
         <div class="pe-qr">

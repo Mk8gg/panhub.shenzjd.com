@@ -28,7 +28,7 @@
           <span
             class="resource-link"
             :class="{ 'resource-link--dead': linkStatus(r) === 'bad' }"
-            :title="linkStatus(r) === 'bad' ? '该资源已失效' : '点击获取资源'"
+            :title="linkStatus(r) === 'bad' ? '该资源已失效' : '点击立即获取'"
             @click="handleGet(r)">
             <span class="link-text">{{ r.note || "网盘资源" }}</span>
           </span>
@@ -150,13 +150,14 @@ function isTransferBtnDisabled(r: MergedLink): boolean {
   return st === "loading" || st === "dead" || (transferBusy.value && st !== "done");
 }
 
+/** 按钮文案：默认动作统一叫「立即获取」（与小程序端一致，不区分盘型） */
 function transferBtnLabel(r: MergedLink): string {
   if (linkStatus(r) === "bad") return "已失效";
   const st = getStatus(r);
   if (st === "loading") return "获取中…";
   if (st === "done") return "已获取";
   if (st === "dead") return "已失效";
-  return transferBusy.value ? "排队中…" : "获取";
+  return transferBusy.value ? "排队中…" : "立即获取";
 }
 
 function btnTitle(r: MergedLink): string {
@@ -165,7 +166,7 @@ function btnTitle(r: MergedLink): string {
   if (st === "done") return "点击查看并复制获取的内容";
   if (st === "loading") return "正在获取";
   if (transferBusy.value) return "正在获取其他资源，请稍候";
-  return "获取资源";
+  return "立即获取资源";
 }
 
 async function handleGet(r: MergedLink) {
