@@ -15,7 +15,7 @@
  * - code 0 + limited         → 当日该盘型获取达上限
  * - code 0 + fallback        → 未拿到新链接，中性原因 + 原链接仍可复制
  * - code 0 + share_url       → 成功（可能带 points 扣分回执）
- * - 无 tid                   → 本地转约 1 秒圈后复制原链接（用户无感知差别）
+ * - 无 tid                   → 把 url 交给后端，由服务端交付原链接并同样计费
  */
 import { computed, ref } from "vue";
 import { ApiError, apiGet, apiPost } from "../api/client";
@@ -163,8 +163,6 @@ export function useTransferDialog() {
   };
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 export function useTransfer() {
   function showToast(msg: string) {
     toast.value = msg;
@@ -179,8 +177,9 @@ export function useTransfer() {
   }
 
   /**
-   * 点击「获取」——所有网盘统一入口：前端不区分哪些盘型接了转存。
-   * 有 tid → 真实转存（后端按链接分派）；没有 tid → 转约 1 秒圈后进「复制」态。
+   * 点击「获取」——所有条目统一入口：前端不区分哪些盘型接了转存。
+   * 有 tid → 真实转存（后端按链接分派）；没有 tid → 传 url，后端交付原链接并计费。
+   * 两者都**必须**经过 /api/transfer：前端没有任何「本地直接给链接」的快捷路径。
    */
   async function requestTransfer(item: {
     tid?: string;
@@ -215,22 +214,18 @@ export function useTransfer() {
     };
 
     try {
-      // 未接转存的盘型：转 ~1 秒圈（让用户以为在请求），然后进「复制」态
-      if (!item.tid) {
-        shareTextCache.value[key] = item.url;
-        await sleep(900 + Math.random() * 500);
-        statusMap.value[key] = "done";
-        openTransferDialog(key, true);
-        return;
-      }
-
+      // 一律走后端换链接（2026-09-16 口径）：有 tid → 服务端按注册表换回原链接
+      // 再转存；没有 tid（正版合规源 / 旧缓存数据）→ 把 url 一并交给服务端，
+      // 由它交付原链接并**同样计费**。
+      // 前端不再有「没有 tid 就在本地转个圈、直接复制原链接」的旁路——那等于
+      // 绕开计费与服务端。
       let shareText = item.url;
-      // 扣分回执（仅真实扣分时后端才下发 points 字段）
+      // 扣分回执（仅在真的扣了分时后端才下发 points 字段）
       let pointsTip = "";
       try {
-        const resp = await apiPost<{ code: number; data: any }>("/transfer", {
-          id: item.tid,
-        });
+        const resp = await apiPost<{ code: number; data: any }>("/transfer", item.tid
+          ? { id: item.tid }
+          : { url: item.url, name: item.name });
 
         // ① 确定性失效：链接不可用，弹窗内给原因
         if (resp.code === 1 && resp.data?.dead) {

@@ -120,7 +120,7 @@ const props = defineProps<{
 defineEmits(["toggle"]);
 
 // 「获取」：状态与请求都在 useTransfer 单例里，同一资源在多个卡片/分组间共享状态，
-// 避免重复请求；无 tid 的盘型由 useTransfer 内部假装请求后复制原链接
+// 避免重复请求；无 tid 的条目（正版合规源等）同样走后端，由服务端交付并计费
 const { statusOf: transferStatus, requestTransfer, anyBusy: transferBusy } = useTransfer();
 
 // 链接有效性检测（服务端探活，异步懒查当前可见链接）。
